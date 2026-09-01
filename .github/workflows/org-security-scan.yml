@@ -48,14 +48,6 @@ jobs:
           echo ''
           echo '=== Total files fetched ==='
           find /tmp/manifests -type f | wc -l
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p /tmp/manifests
-          python3 "$GITHUB_WORKSPACE/.github/scripts/fetch-manifests.py"
-          echo ''
-          echo '=== Total files fetched ==='
-          find /tmp/manifests -type f | wc -l
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
