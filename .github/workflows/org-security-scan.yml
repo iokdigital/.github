@@ -137,7 +137,7 @@ jobs:
       - name: Install OSV-Scanner
         run: |
           mkdir -p ./bin
-          curl -fsSL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_Linux_x86_64 -o ./bin/osv-scanner
+          curl -fsSL https://github.com/google/osv-scanner/releases/download/v2.5.1/osv-scanner_linux_amd64 -o ./bin/osv-scanner
           chmod +x ./bin/osv-scanner
           ./bin/osv-scanner --version
 
