@@ -119,30 +119,27 @@ jobs:
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
 
-      - name: Setup tools
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Setup Python + install pip-audit
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install pip-audit
         run: |
-          set -e
-          echo '=== Installing Node.js 24 ==='
-          curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
-          apt-get install -y nodejs >/dev/null
-          node --version
-          npm --version
-          echo ''
-          echo '=== Installing pip-audit ==='
-          python3 -m pip install --break-system-packages --quiet pip-audit 2>&1 | tail -3
-          python3 -m pip_audit --version
-          echo ''
-          echo '=== Installing OSV-Scanner ==='
+          python -m pip install --user pip-audit
+          export PATH="$HOME/.local/bin:$PATH"
+          pip-audit --version
+
+      - name: Install OSV-Scanner
+        run: |
           mkdir -p ./bin
-          curl -sfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/install.sh -o /tmp/install-osv.sh
-          bash /tmp/install-osv.sh -b ./bin 2>&1 | tail -5
-          echo "--- bin contents ---"
-          ls -la ./bin/
-          if [ ! -x ./bin/osv-scanner ]; then
-            echo '::error::OSV-Scanner install failed - falling back to skipping Go scan'
-          else
-            ./bin/osv-scanner --version
-          fi
+          curl -fsSL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_Linux_x86_64 -o ./bin/osv-scanner
+          chmod +x ./bin/osv-scanner
+          ./bin/osv-scanner --version
 
       - name: Scan Go modules with OSV-Scanner
         run: |
