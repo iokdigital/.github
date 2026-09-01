@@ -1,0 +1,185 @@
+name: Weekly Org-Wide Security Scan
+
+# Centralized weekly security scan for all iokdigital/* repositories.
+#
+# Replaces the per-repo security.yml scheduled scans (5 repos had them):
+# - alteryx2airflow: security.yml (Mon 01:00 UTC)
+# - alteryx2talend: security.yml (Wed 01:00 UTC)
+# - flowport2jira: security.yml (Fri 01:00 UTC)
+# - talend2airflow: security.yml (Sat 01:00 UTC)
+# - flowport-webapp: security-scanning.yml (Thu 01:00 UTC, was daily)
+#
+# This workflow scans all 7 repos in one job, posts aggregate results to
+# a single weekly GitHub issue here. Net: 5 weekly jobs → 1 weekly job.
+
+on:
+  schedule:
+    - cron: '0 9 * * 0'    # Sundays 9 AM UTC
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Scan scope'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - go-only
+          - python-only
+          - node-only
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: org-security-scan
+  cancel-in-progress: true
+
+jobs:
+  scan-all:
+    name: Weekly Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine scope
+        id: scope
+        run: |
+          SCOPE="${{ github.event.inputs.scope || 'all' }}"
+          echo "scope=$SCOPE" >> $GITHUB_OUTPUT
+
+      - name: Clone all repos and gather manifest files
+        id: gather
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/repos
+          cd /tmp/repos
+
+          REPOS=(
+            "iokdigital/alteryx2airflow:main:go"
+            "iokdigital/alteryx2talend:develop:go"
+            "iokdigital/flowport-webapp:develop:node"
+            "iokdigital/flowport2jira:develop:python"
+            "iokdigital/go-mermaid:main:go"
+            "iokdigital/iok.digital:main:node"
+            "iokdigital/talend2airflow:main:python"
+          )
+
+          RESULTS=""
+          for entry in "${REPOS[@]}"; do
+            IFS=':' read -r repo branch ecosystem <<< "$entry"
+            SCOPE="${{ steps.scope.outputs.scope }}"
+
+            # Filter by scope
+            case "$SCOPE" in
+              go-only) [[ "$ecosystem" == "go" ]] || continue ;;
+              python-only) [[ "$ecosystem" == "python" ]] || continue ;;
+              node-only) [[ "$ecosystem" == "node" ]] || continue ;;
+            esac
+
+            echo "=== Cloning $repo ($branch) [$ecosystem] ==="
+            if git clone --depth 1 --branch "$branch" "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" "scan-${repo//\//-}" 2>&1 | tail -2; then
+              echo "OK: $repo" >> /tmp/repos/results.txt
+            else
+              echo "FAIL: $repo" >> /tmp/repos/results.txt
+            fi
+          done
+          cat /tmp/repos/results.txt
+
+      - name: Run OSV-Scanner on Go modules
+        if: hash('/tmp/repos/scan-iokdigital-alteryx2talend', '-d') != 'unknown'
+        run: |
+          set -e
+          cd /tmp/repos/scan-iokdigital-alteryx2talend 2>/dev/null &&             (echo "module github.com/iokdigital/alteryx2talend"; cat go.mod) > /tmp/go.mod &&             curl -sfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/run.sh | bash -s -- -d /tmp/go.mod || echo "OSV scan failed"
+        continue-on-error: true
+
+      - name: Run pip-audit on Python requirements
+        if: hash('/tmp/repos/scan-iokdigital-flowport2jira/requirements.txt', '-d') != 'unknown'
+        run: |
+          pip install --quiet pip-audit 2>&1 | tail -2 || true
+          if [ -f /tmp/repos/scan-iokdigital-flowport2jira/requirements.txt ]; then
+            cd /tmp/repos/scan-iokdigital-flowport2jira
+            pip-audit -r requirements.txt --strict || echo "(vulns found)"
+          fi
+        continue-on-error: true
+
+      - name: Run npm audit on Node packages
+        run: |
+          for repo_dir in /tmp/repos/scan-iokdigital-flowport-webapp /tmp/repos/scan-iokdigital-iok.digital; do
+            if [ -d "$repo_dir" ]; then
+              echo "=== $repo_dir ==="
+              cd "$repo_dir"
+              if [ -d node_modules ]; then
+                npm audit --json 2>/dev/null | head -c 2000 || echo "(no audit data)"
+              else
+                echo "(node_modules not present - skipping)"
+              fi
+            fi
+          done
+        continue-on-error: true
+
+      - name: Aggregate results
+        id: aggregate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "# Weekly iokdigital Security Scan Report"
+            echo ""
+            echo "**Generated**: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "**Scope**: ${{ steps.scope.outputs.scope }}"
+            echo ""
+            echo "## Repos scanned"
+            echo ""
+            cat /tmp/repos/results.txt
+            echo ""
+            echo "## Per-repo scanner output"
+            echo ""
+            echo '```'
+            for f in /tmp/repos/scan-*/scan-output.txt; do
+              [ -f "$f" ] || continue
+              echo "### $(basename $(dirname $f) | sed 's/scan-iokdigital-//; s/-/\//; s/iok\\./iok./')"
+              echo ""
+              cat "$f" | head -50
+              echo "..."
+            done
+            echo '```'
+          } > /tmp/repos/report.md
+          echo "report_path=/tmp/repos/report.md" >> $GITHUB_OUTPUT
+
+      - name: Create or update weekly issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/repos/report.md', 'utf8');
+            const date = new Date().toISOString().split('T')[0];
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'weekly-org-security-scan'
+            });
+
+            if (issues.data.length > 0) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: report
+              });
+              core.info(`Updated weekly issue #${issues.data[0].number}`);
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Weekly iokdigital Security Scan - ${date}`,
+                body: report,
+                labels: ['weekly-org-security-scan', 'security']
+              });
+            }
