@@ -3,9 +3,15 @@ name: Weekly Org-Wide Security Scan
 # Centralized weekly security scan for all iokdigital/* repositories.
 #
 # Uses the GitHub Contents API to download dependency manifests (package.json,
-# requirements.txt, go.mod) instead of full git clones. This works with
-# the default GITHUB_TOKEN (which can read other org repos via API) but
-# cannot git clone them.
+# requirements.txt, go.mod) instead of full git clones. The default GITHUB_TOKEN
+# can read other org repos via the API but cannot git clone them.
+#
+# Replaces 5 per-repo security.yml weekly cron jobs:
+# - alteryx2airflow: main
+# - alteryx2talend: develop
+# - flowport-webapp: develop
+# - flowport2jira: develop
+# - talend2airflow: main
 
 on:
   schedule:
@@ -31,10 +37,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
           mkdir -p /tmp/manifests
           cd /tmp/manifests
 
-          # (repo, default_branch) tuples
           REPOS=(
             "iokdigital/alteryx2airflow:main"
             "iokdigital/alteryx2talend:develop"
@@ -48,44 +54,64 @@ jobs:
           fetch_file() {
             local path="$1" dest_dir="$2"
             mkdir -p "$dest_dir"
-            curl -sfL \
+            local http_code
+            http_code=$(curl -sfL -o "${dest_dir}/${path##*/}" -w "%{http_code}" \
               -H "Authorization: token ${GH_TOKEN}" \
               -H "Accept: application/vnd.github.raw" \
-              "https://api.github.com/repos/${repo}/contents/${path}?ref=${branch}" \
-              -o "${dest_dir}/${path##*/}" 2>/dev/null && echo "  OK: $path" || echo "  MISSING: $path"
+              "https://api.github.com/repos/${repo}/contents/${path}?ref=${branch}" 2>/dev/null) || http_code="404"
+            if [ "$http_code" = "200" ]; then
+              echo "  OK: $path"
+            else
+              echo "  MISSING ($http_code): $path"
+              rm -f "${dest_dir}/${path##*/}"
+            fi
           }
 
           for entry in "${REPOS[@]}"; do
             IFS=':' read -r repo branch <<< "$entry"
             safe_name=$(echo "$repo" | tr '/' '-')
+            echo ""
             echo "=== Fetching manifests from $repo @ $branch ==="
             case "$repo" in
-              # Go repos
-              iokdigital/alteryx2airflow|iokdigital/alteryx2talend|iokdigital/go-mermaid|iokdigital/talend2airflow)
+              # Go repos - always have go.mod; some have nested
+              iokdigital/alteryx2airflow|iokdigital/alteryx2talend|iokdigital/go-mermaid)
                 fetch_file "go.mod" "$safe_name"
                 fetch_file "go.sum" "$safe_name"
-                fetch_file "worker/go.mod" "$safe_name" 2>/dev/null || true
-                fetch_file "worker/requirements.txt" "$safe_name" 2>/dev/null || true
+                fetch_file "worker/go.mod" "$safe_name"
+                fetch_file "worker/requirements.txt" "$safe_name"
+                fetch_file "worker/go.sum" "$safe_name"
                 ;;
-              # Python repos
-              iokdigital/flowport2jira|iokdigital/talend2airflow|iokdigital/alteryx2airflow)
-                fetch_file "requirements.txt" "$safe_name" 2>/dev/null || true
-                fetch_file "worker/requirements.txt" "$safe_name" 2>/dev/null || true
+              iokdigital/talend2airflow)
+                fetch_file "go.mod" "$safe_name"
+                fetch_file "go.sum" "$safe_name"
+                fetch_file "worker/go.mod" "$safe_name"
+                fetch_file "worker/go.sum" "$safe_name"
+                fetch_file "worker/requirements.txt" "$safe_name"
+                ;;
+              # Python-only repo
+              iokdigital/flowport2jira)
+                fetch_file "requirements.txt" "$safe_name"
+                fetch_file "requirements-lock.txt" "$safe_name"
+                fetch_file "requirements-dev.txt" "$safe_name"
                 ;;
               # Node repos
-              iokdigital/flowport-webapp|iokdigital/iok.digital)
-                fetch_file "frontend/package.json" "$safe_name" 2>/dev/null || true
-                fetch_file "frontend/package-lock.json" "$safe_name" 2>/dev/null || true
-                fetch_file "backend/requirements.txt" "$safe_name" 2>/dev/null || true
-                fetch_file "backend/pyproject.toml" "$safe_name" 2>/dev/null || true
-                fetch_file "package.json" "$safe_name" 2>/dev/null || true
-                fetch_file "package-lock.json" "$safe_name" 2>/dev/null || true
+              iokdigital/flowport-webapp)
+                fetch_file "frontend/package.json" "$safe_name"
+                fetch_file "frontend/package-lock.json" "$safe_name"
+                fetch_file "backend/pyproject.toml" "$safe_name"
+                fetch_file "backend/requirements.txt" "$safe_name"
+                fetch_file "backend/requirements-lock.txt" "$safe_name"
+                ;;
+              iokdigital/iok.digital)
+                fetch_file "package.json" "$safe_name"
+                fetch_file "package-lock.json" "$safe_name"
+                fetch_file "lambda/package.json" "$safe_name"
+                fetch_file "lambda/package-lock.json" "$safe_name"
                 ;;
             esac
           done
           echo ""
-          echo "=== Fetched manifests ==="
-          find /tmp/manifests -type f | sort
+          echo "=== Total files fetched: $(find /tmp/manifests -type f | wc -l) ==="
 
       - name: Checkout summarization scripts
         uses: actions/checkout@v7
@@ -95,47 +121,77 @@ jobs:
 
       - name: Setup tools
         run: |
-          curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1
-          apt-get install -y nodejs >/dev/null 2>&1 || true
+          set -e
+          echo '=== Installing Node.js 24 ==='
+          curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+          apt-get install -y nodejs >/dev/null
           node --version
-          python3 -m pip install --quiet --user pip-audit 2>&1 | tail -2 || true
-          curl -sfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/install.sh | bash -s -- -b ./bin 2>&1 | tail -3 || true
+          npm --version
+          echo ''
+          echo '=== Installing pip-audit ==='
+          python3 -m pip install --break-system-packages --quiet pip-audit 2>&1 | tail -3
+          python3 -m pip_audit --version
+          echo ''
+          echo '=== Installing OSV-Scanner ==='
+          mkdir -p ./bin
+          curl -sfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/install.sh -o /tmp/install-osv.sh
+          bash /tmp/install-osv.sh -b ./bin 2>&1 | tail -5
+          echo "--- bin contents ---"
+          ls -la ./bin/
+          if [ ! -x ./bin/osv-scanner ]; then
+            echo '::error::OSV-Scanner install failed - falling back to skipping Go scan'
+          else
+            ./bin/osv-scanner --version
+          fi
 
       - name: Scan Go modules with OSV-Scanner
         run: |
           mkdir -p /tmp/results/go
+          scanned=0
           for repo_dir in /tmp/manifests/iokdigital-*; do
             [ -f "${repo_dir}/go.mod" ] || continue
             repo=$(basename "$repo_dir")
+            if [ ! -x ./bin/osv-scanner ]; then
+              echo "=== ${repo}: SKIPPED (osv-scanner not installed) ==="
+              continue
+            fi
             echo "=== OSV: $repo ==="
-            ./bin/osv-scanner -r "${repo_dir}" --format json \
-              > "/tmp/results/go/${repo}_osv.json" 2> "/tmp/results/go/${repo}_stderr.txt" || true
-            python3 "${GITHUB_WORKSPACE}/.github/scripts/summarize-osv.py" "/tmp/results/go/${repo}_osv.json" || true
+            if ./bin/osv-scanner -r "${repo_dir}" --format json \
+                > "/tmp/results/go/${repo}_osv.json" 2> "/tmp/results/go/${repo}_stderr.txt"; then
+              python3 "${GITHUB_WORKSPACE}/.github/scripts/summarize-osv.py" "/tmp/results/go/${repo}_osv.json" || true
+              scanned=$((scanned + 1))
+            else
+              echo "  (scan failed - see ${repo}_stderr.txt)"
+            fi
           done
+          echo ""
+          echo "=== Total Go repos scanned: $scanned ==="
         continue-on-error: true
 
       - name: Scan Python requirements with pip-audit
         run: |
           mkdir -p /tmp/results/python
-          export PATH="${HOME}/.local/bin:${PATH}"
-          pip-audit --version 2>&1 || echo "pip-audit not available"
+          scanned=0
           for repo_dir in /tmp/manifests/iokdigital-*; do
             [ -f "${repo_dir}/requirements.txt" ] || continue
             repo=$(basename "$repo_dir")
             echo "=== pip-audit: $repo ==="
-            (cd "$repo_dir" && pip-audit -r requirements.txt --disable-pip 2>&1) \
-              > "/tmp/results/python/${repo}_stdout.txt" || true
-            if [ -f "${repo_dir}/pyproject.toml" ]; then
-              echo "  (also scanning pyproject.toml)"
-              (cd "$repo_dir" && pip-audit --disable-pip 2>&1) \
-                >> "/tmp/results/python/${repo}_stdout.txt" || true
+            if (cd "$repo_dir" && python3 -m pip_audit -r requirements.txt --disable-pip --strict 2>&1) \
+                > "/tmp/results/python/${repo}_stdout.txt"; then
+              scanned=$((scanned + 1))
+              echo "  OK"
+            else
+              echo "  (vulnerabilities found or audit failed - see ${repo}_stdout.txt)"
             fi
           done
+          echo ""
+          echo "=== Total Python repos scanned: $scanned ==="
         continue-on-error: true
 
       - name: Scan Node packages with npm audit
         run: |
           mkdir -p /tmp/results/node
+          scanned=0
           for repo_dir in /tmp/manifests/iokdigital-*; do
             [ -f "${repo_dir}/package.json" ] || continue
             [ -f "${repo_dir}/package-lock.json" ] || continue
@@ -143,11 +199,18 @@ jobs:
             echo "=== npm audit: $repo ==="
             cd "$repo_dir"
             if [ ! -d node_modules ]; then
-              npm install --silent --no-audit --no-fund --ignore-scripts 2>/dev/null || true
+              echo "  (running npm install...)"
+              npm install --silent --no-audit --no-fund --ignore-scripts 2>&1 | tail -2 || echo "  (npm install failed - may have vulns anyway)"
             fi
-            npm audit --json 2>/dev/null > "/tmp/results/node/${repo}_audit.json" || true
-            python3 "${GITHUB_WORKSPACE}/.github/scripts/summarize-npm-audit.py" "/tmp/results/node/${repo}_audit.json" || true
+            if npm audit --json 2>/dev/null > "/tmp/results/node/${repo}_audit.json"; then
+              python3 "${GITHUB_WORKSPACE}/.github/scripts/summarize-npm-audit.py" "/tmp/results/node/${repo}_audit.json" || true
+              scanned=$((scanned + 1))
+            else
+              echo "  (npm audit failed)"
+            fi
           done
+          echo ""
+          echo "=== Total Node repos scanned: $scanned ==="
         continue-on-error: true
 
       - name: Build weekly report
@@ -160,34 +223,37 @@ jobs:
             echo ""
             echo "## Summary"
             echo ""
-            echo "| Ecosystem | Files | Notes |"
+            echo "| Ecosystem | Files scanned | Notes |"
             echo "|---|---|---|"
             for eco in go python node; do
-              count=$(find /tmp/results/$eco -type f 2>/dev/null | wc -l | tr -d ' ')
-              echo "| $eco | $count | see below |"
+              count=$(find /tmp/results/$eco -type f -size +0 2>/dev/null | wc -l | tr -d ' ')
+              echo "| $eco | $count | $(find /tmp/manifests -maxdepth 1 -type d -name "iokdigital-*" | wc -l | tr -d ' ') repos |"
             done
             echo ""
-            echo "## Results"
+            echo "## Detailed results"
             echo ""
             for eco in go python node; do
               echo "### $eco"
               echo ""
-              if [ -d /tmp/results/$eco ]; then
+              if [ -d /tmp/results/$eco ] && [ "$(ls -A /tmp/results/$eco 2>/dev/null)" ]; then
                 for f in /tmp/results/$eco/*; do
                   [ -f "$f" ] || continue
                   echo "--- $(basename $f) ---"
                   if [[ "$f" == *.json ]]; then
-                    python3 "${GITHUB_WORKSPACE}/.github/scripts/$(echo summarize-osv.py)" "$f" 2>/dev/null || head -20 "$f"
+                    python3 "${GITHUB_WORKSPACE}/.github/scripts/summarize-osv.py" "$f" 2>/dev/null || head -30 "$f"
                   else
-                    head -20 "$f"
+                    head -30 "$f"
                   fi
                   echo ""
                 done
+              else
+                echo "(no results)"
               fi
             done
-            echo "## Detailed results"
             echo ""
-            echo "All raw outputs uploaded as workflow artifacts."
+            echo "## Artifacts"
+            echo ""
+            echo "Raw scanner outputs uploaded as workflow artifacts (retention 90 days)."
           } > /tmp/weekly-report.md
           echo "report size: $(wc -l < /tmp/weekly-report.md) lines"
 
