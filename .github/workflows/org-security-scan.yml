@@ -39,9 +39,11 @@ jobs:
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
 
-      - name: Fetch dependency manifests via Contents API
+      - name: Fetch dependency manifests via Git Trees API
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Uses CROSS_REPO_READ_TOKEN (PAT with cross-repo read) if set,
+          # otherwise falls back to default GITHUB_TOKEN (only works for public repos)
+          GH_TOKEN: ${{ secrets.CROSS_REPO_READ_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/manifests
           python3 "$GITHUB_WORKSPACE/.github/scripts/fetch-manifests.py"
