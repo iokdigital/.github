@@ -2,31 +2,23 @@ name: Weekly Org-Wide Security Scan
 
 # Centralized weekly security scan for all iokdigital/* repositories.
 #
-# Replaces the per-repo security.yml scheduled scans (5 repos had them):
+# Replaces 5 per-repo security.yml weekly cron jobs:
 # - alteryx2airflow: security.yml (Mon 01:00 UTC)
 # - alteryx2talend: security.yml (Wed 01:00 UTC)
 # - flowport2jira: security.yml (Fri 01:00 UTC)
 # - talend2airflow: security.yml (Sat 01:00 UTC)
 # - flowport-webapp: security-scanning.yml (Thu 01:00 UTC, was daily)
 #
-# This workflow scans all 7 repos in one job, posts aggregate results to
-# a single weekly GitHub issue here. Net: 5 weekly jobs → 1 weekly job.
+# Architecture:
+#   clone job (matrix: one per repo) → scan job (per ecosystem) → aggregate
+#
+# This file replaces the broken v1 (which used bash `hash()` builtin that
+# GitHub Actions does not recognize).
 
 on:
   schedule:
     - cron: '0 9 * * 0'    # Sundays 9 AM UTC
   workflow_dispatch:
-    inputs:
-      scope:
-        description: 'Scan scope'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - go-only
-          - python-only
-          - node-only
 
 permissions:
   contents: read
@@ -40,123 +32,234 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  scan-all:
-    name: Weekly Security Scan
+  clone:
+    name: Clone ${{ matrix.repo }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: iokdigital/alteryx2airflow
+            branch: main
+            ecosystem: go
+          - repo: iokdigital/alteryx2talend
+            branch: develop
+            ecosystem: go
+          - repo: iokdigital/flowport-webapp
+            branch: develop
+            ecosystem: node
+          - repo: iokdigital/flowport2jira
+            branch: develop
+            ecosystem: python
+          - repo: iokdigital/go-mermaid
+            branch: main
+            ecosystem: go
+          - repo: iokdigital/iok.digital
+            branch: main
+            ecosystem: node
+          - repo: iokdigital/talend2airflow
+            branch: main
+            ecosystem: python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Clone target repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/scan
+          cd /tmp/scan
+          git clone --depth 1 --branch "${{ matrix.branch }}" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ matrix.repo }}.git" \
+            "${{ matrix.repo }}"
+          ls -la "${{ matrix.repo }}"
+
+      - name: Upload clone artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: clone-${{ matrix.repo }}
+          path: /tmp/scan/${{ matrix.repo }}
+          retention-days: 1
+          if-no-files-found: error
+
+  scan-go:
+    name: Scan Go modules
+    needs: clone
     runs-on: ubuntu-latest
     steps:
-      - name: Determine scope
-        id: scope
+      - name: Download Go repos
+        uses: actions/download-artifact@v7
+        with:
+          pattern: clone-iokdigital-*
+          path: /tmp/scan
+
+      - name: Install OSV-Scanner
         run: |
-          SCOPE="${{ github.event.inputs.scope || 'all' }}"
-          echo "scope=$SCOPE" >> $GITHUB_OUTPUT
+          curl -sfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/install.sh | bash -s -- -b ./bin
+          ./bin/osv-scanner --version
 
-      - name: Clone all repos and gather manifest files
-        id: gather
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run OSV-Scanner
         run: |
-          mkdir -p /tmp/repos
-          cd /tmp/repos
-
-          REPOS=(
-            "iokdigital/alteryx2airflow:main:go"
-            "iokdigital/alteryx2talend:develop:go"
-            "iokdigital/flowport-webapp:develop:node"
-            "iokdigital/flowport2jira:develop:python"
-            "iokdigital/go-mermaid:main:go"
-            "iokdigital/iok.digital:main:node"
-            "iokdigital/talend2airflow:main:python"
-          )
-
-          RESULTS=""
-          for entry in "${REPOS[@]}"; do
-            IFS=':' read -r repo branch ecosystem <<< "$entry"
-            SCOPE="${{ steps.scope.outputs.scope }}"
-
-            # Filter by scope
-            case "$SCOPE" in
-              go-only) [[ "$ecosystem" == "go" ]] || continue ;;
-              python-only) [[ "$ecosystem" == "python" ]] || continue ;;
-              node-only) [[ "$ecosystem" == "node" ]] || continue ;;
-            esac
-
-            echo "=== Cloning $repo ($branch) [$ecosystem] ==="
-            if git clone --depth 1 --branch "$branch" "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" "scan-${repo//\//-}" 2>&1 | tail -2; then
-              echo "OK: $repo" >> /tmp/repos/results.txt
+          mkdir -p /tmp/results/go
+          for repo_dir in /tmp/scan/clone-iokdigital-*/; do
+            repo=$(basename "$repo_dir" | sed 's/^clone-//')
+            echo "=== Scanning $repo ==="
+            if [ -f "$repo_dir/go.mod" ]; then
+              ./bin/osv-scanner --config=- -r "$repo_dir" --format json \
+                --output "/tmp/results/go/${repo//\//_}_osv.json" \
+                > /tmp/results/go/${repo//\//_}_stdout.txt 2>&1 || true
+              echo "  OSV output: $(wc -l < /tmp/results/go/${repo//\//_}_stdout.txt) lines"
             else
-              echo "FAIL: $repo" >> /tmp/repos/results.txt
-            fi
-          done
-          cat /tmp/repos/results.txt
-
-      - name: Run OSV-Scanner on Go modules
-        if: hash('/tmp/repos/scan-iokdigital-alteryx2talend', '-d') != 'unknown'
-        run: |
-          set -e
-          cd /tmp/repos/scan-iokdigital-alteryx2talend 2>/dev/null &&             (echo "module github.com/iokdigital/alteryx2talend"; cat go.mod) > /tmp/go.mod &&             curl -sfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/run.sh | bash -s -- -d /tmp/go.mod || echo "OSV scan failed"
-        continue-on-error: true
-
-      - name: Run pip-audit on Python requirements
-        if: hash('/tmp/repos/scan-iokdigital-flowport2jira/requirements.txt', '-d') != 'unknown'
-        run: |
-          pip install --quiet pip-audit 2>&1 | tail -2 || true
-          if [ -f /tmp/repos/scan-iokdigital-flowport2jira/requirements.txt ]; then
-            cd /tmp/repos/scan-iokdigital-flowport2jira
-            pip-audit -r requirements.txt --strict || echo "(vulns found)"
-          fi
-        continue-on-error: true
-
-      - name: Run npm audit on Node packages
-        run: |
-          for repo_dir in /tmp/repos/scan-iokdigital-flowport-webapp /tmp/repos/scan-iokdigital-iok.digital; do
-            if [ -d "$repo_dir" ]; then
-              echo "=== $repo_dir ==="
-              cd "$repo_dir"
-              if [ -d node_modules ]; then
-                npm audit --json 2>/dev/null | head -c 2000 || echo "(no audit data)"
-              else
-                echo "(node_modules not present - skipping)"
-              fi
+              echo "  no go.mod"
             fi
           done
         continue-on-error: true
 
-      - name: Aggregate results
-        id: aggregate
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Go scan results
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: scan-results-go
+          path: /tmp/results/go
+          retention-days: 7
+          if-no-files-found: ignore
+
+  scan-python:
+    name: Scan Python deps
+    needs: clone
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Python repos
+        uses: actions/download-artifact@v7
+        with:
+          pattern: clone-iokdigital-*
+          path: /tmp/scan
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install pip-audit
+        run: pip install --quiet --user pip-audit
+
+      - name: Run pip-audit
+        run: |
+          mkdir -p /tmp/results/python
+          export PATH="$HOME/.local/bin:$PATH"
+          for repo_dir in /tmp/scan/clone-iokdigital-*/; do
+            repo=$(basename "$repo_dir" | sed 's/^clone-//')
+            echo "=== Scanning $repo ==="
+            if [ -f "$repo_dir/requirements.txt" ]; then
+              (cd "$repo_dir" && pip-audit -r requirements.txt --strict --disable-pip 2>&1) \
+                > /tmp/results/python/${repo//\//_}_stdout.txt || true
+              echo "  pip-audit output: $(wc -l < /tmp/results/python/${repo//\//_}_stdout.txt) lines"
+            else
+              echo "  no requirements.txt"
+            fi
+          done
+        continue-on-error: true
+
+      - name: Upload Python scan results
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: scan-results-python
+          path: /tmp/results/python
+          retention-days: 7
+          if-no-files-found: ignore
+
+  scan-node:
+    name: Scan Node packages
+    needs: clone
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Node repos
+        uses: actions/download-artifact@v7
+        with:
+          pattern: clone-iokdigital-*
+          path: /tmp/scan
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Run npm audit
+        run: |
+          mkdir -p /tmp/results/node
+          for repo_dir in /tmp/scan/clone-iokdigital-*/; do
+            repo=$(basename "$repo_dir" | sed 's/^clone-//')
+            echo "=== Scanning $repo ==="
+            if [ -f "$repo_dir/package.json" ]; then
+              (cd "$repo_dir" && npm install --silent --no-audit --no-fund 2>/dev/null && npm audit --json 2>/dev/null) \
+                > /tmp/results/node/${repo//\//_}_audit.json || true
+              echo "  npm audit JSON: $(wc -c < /tmp/results/node/${repo//\//_}_audit.json) bytes"
+            else
+              echo "  no package.json"
+            fi
+          done
+        continue-on-error: true
+
+      - name: Upload Node scan results
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: scan-results-node
+          path: /tmp/results/node
+          retention-days: 7
+          if-no-files-found: ignore
+
+  aggregate:
+    name: Aggregate + create weekly issue
+    needs: [scan-go, scan-python, scan-node]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all scan results
+        uses: actions/download-artifact@v7
+        with:
+          pattern: scan-results-*
+          path: /tmp/results
+          merge-multiple: true
+
+      - name: Build weekly report
         run: |
           {
-            echo "# Weekly iokdigital Security Scan Report"
+            echo "# Weekly iokdigital Security Scan"
             echo ""
             echo "**Generated**: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo "**Scope**: ${{ steps.scope.outputs.scope }}"
+            echo "**Repos scanned**: 7"
             echo ""
-            echo "## Repos scanned"
+            echo "## Results by ecosystem"
             echo ""
-            cat /tmp/repos/results.txt
-            echo ""
-            echo "## Per-repo scanner output"
-            echo ""
-            echo '```'
-            for f in /tmp/repos/scan-*/scan-output.txt; do
-              [ -f "$f" ] || continue
-              echo "### $(basename $(dirname $f) | sed 's/scan-iokdigital-//; s/-/\//; s/iok\\./iok./')"
+            for eco in go python node; do
+              echo "### $eco"
               echo ""
-              cat "$f" | head -50
-              echo "..."
+              echo '```'
+              if [ -d /tmp/results/$eco ]; then
+                for f in /tmp/results/$eco/*_stdout.txt; do
+                  [ -f "$f" ] || continue
+                  echo "--- $(basename $f _stdout.txt) ---"
+                  head -30 "$f"
+                  echo ""
+                done
+              else
+                echo "(no results)"
+              fi
+              echo '```'
+              echo ""
             done
-            echo '```'
-          } > /tmp/repos/report.md
-          echo "report_path=/tmp/repos/report.md" >> $GITHUB_OUTPUT
+          } > /tmp/weekly-report.md
+          echo "report_path=/tmp/weekly-report.md" >> $GITHUB_OUTPUT
+          wc -l /tmp/weekly-report.md
 
       - name: Create or update weekly issue
-        if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const report = fs.readFileSync('/tmp/repos/report.md', 'utf8');
+            const report = fs.readFileSync('/tmp/weekly-report.md', 'utf8');
             const date = new Date().toISOString().split('T')[0];
 
             const issues = await github.rest.issues.listForRepo({
@@ -166,20 +269,24 @@ jobs:
               labels: 'weekly-org-security-scan'
             });
 
+            const title = `Weekly iokdigital Security Scan - ${date}`;
+            const body = report;
+
             if (issues.data.length > 0) {
               await github.rest.issues.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issues.data[0].number,
-                body: report
+                body,
+                state: 'open'
               });
-              core.info(`Updated weekly issue #${issues.data[0].number}`);
+              core.info(`Updated issue #${issues.data[0].number}`);
             } else {
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                title: `Weekly iokdigital Security Scan - ${date}`,
-                body: report,
+                title,
+                body,
                 labels: ['weekly-org-security-scan', 'security']
               });
             }
