@@ -33,6 +33,12 @@ jobs:
     name: Weekly Security Scan
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout summarization scripts (before fetch so they exist)
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
       - name: Fetch dependency manifests via Contents API
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -42,12 +48,14 @@ jobs:
           echo ''
           echo '=== Total files fetched ==='
           find /tmp/manifests -type f | wc -l
-
-      - name: Checkout summarization scripts
-        uses: actions/checkout@v7
-        with:
-          sparse-checkout: .github/scripts
-          sparse-checkout-cone-mode: false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/manifests
+          python3 "$GITHUB_WORKSPACE/.github/scripts/fetch-manifests.py"
+          echo ''
+          echo '=== Total files fetched ==='
+          find /tmp/manifests -type f | wc -l
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
