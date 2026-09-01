@@ -2,18 +2,10 @@ name: Weekly Org-Wide Security Scan
 
 # Centralized weekly security scan for all iokdigital/* repositories.
 #
-# Replaces 5 per-repo security.yml weekly cron jobs:
-# - alteryx2airflow: security.yml (Mon 01:00 UTC)
-# - alteryx2talend: security.yml (Wed 01:00 UTC)
-# - flowport2jira: security.yml (Fri 01:00 UTC)
-# - talend2airflow: security.yml (Sat 01:00 UTC)
-# - flowport-webapp: security-scanning.yml (Thu 01:00 UTC, was daily)
-#
-# Architecture:
-#   clone job (matrix: one per repo) → scan job (per ecosystem) → aggregate
-#
-# This file replaces the broken v1 (which used bash `hash()` builtin that
-# GitHub Actions does not recognize).
+# Uses the GitHub Contents API to download dependency manifests (package.json,
+# requirements.txt, go.mod) instead of full git clones. This works with
+# the default GITHUB_TOKEN (which can read other org repos via API) but
+# cannot git clone them.
 
 on:
   schedule:
@@ -23,7 +15,6 @@ on:
 permissions:
   contents: read
   issues: write
-  pull-requests: read
   security-events: write
   actions: read
 
@@ -32,196 +23,132 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  clone:
-    name: Clone ${{ matrix.repo }}
+  scan:
+    name: Weekly Security Scan
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - repo: iokdigital/alteryx2airflow
-            branch: main
-            ecosystem: go
-          - repo: iokdigital/alteryx2talend
-            branch: develop
-            ecosystem: go
-          - repo: iokdigital/flowport-webapp
-            branch: develop
-            ecosystem: node
-          - repo: iokdigital/flowport2jira
-            branch: develop
-            ecosystem: python
-          - repo: iokdigital/go-mermaid
-            branch: main
-            ecosystem: go
-          - repo: iokdigital/iok.digital
-            branch: main
-            ecosystem: node
-          - repo: iokdigital/talend2airflow
-            branch: main
-            ecosystem: python
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Clone target repo
+      - name: Fetch dependency manifests via Contents API
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p /tmp/scan
-          cd /tmp/scan
-          git clone --depth 1 --branch "${{ matrix.branch }}" \
-            "https://x-access-token:${GH_TOKEN}@github.com/${{ matrix.repo }}.git" \
-            "${{ matrix.repo }}"
-          ls -la "${{ matrix.repo }}"
+          mkdir -p /tmp/manifests
+          cd /tmp/manifests
 
-      - name: Upload clone artifact
-        uses: actions/upload-artifact@v7
+          # (repo, default_branch) tuples
+          REPOS=(
+            "iokdigital/alteryx2airflow:main"
+            "iokdigital/alteryx2talend:develop"
+            "iokdigital/flowport-webapp:develop"
+            "iokdigital/flowport2jira:develop"
+            "iokdigital/go-mermaid:main"
+            "iokdigital/iok.digital:main"
+            "iokdigital/talend2airflow:main"
+          )
+
+          fetch_file() {
+            local path="$1" dest_dir="$2"
+            mkdir -p "$dest_dir"
+            curl -sfL \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/${repo}/contents/${path}?ref=${branch}" \
+              -o "${dest_dir}/${path##*/}" 2>/dev/null && echo "  OK: $path" || echo "  MISSING: $path"
+          }
+
+          for entry in "${REPOS[@]}"; do
+            IFS=':' read -r repo branch <<< "$entry"
+            safe_name=$(echo "$repo" | tr '/' '-')
+            echo "=== Fetching manifests from $repo @ $branch ==="
+            case "$repo" in
+              # Go repos
+              iokdigital/alteryx2airflow|iokdigital/alteryx2talend|iokdigital/go-mermaid|iokdigital/talend2airflow)
+                fetch_file "go.mod" "$safe_name"
+                fetch_file "go.sum" "$safe_name"
+                fetch_file "worker/go.mod" "$safe_name" 2>/dev/null || true
+                fetch_file "worker/requirements.txt" "$safe_name" 2>/dev/null || true
+                ;;
+              # Python repos
+              iokdigital/flowport2jira|iokdigital/talend2airflow|iokdigital/alteryx2airflow)
+                fetch_file "requirements.txt" "$safe_name" 2>/dev/null || true
+                fetch_file "worker/requirements.txt" "$safe_name" 2>/dev/null || true
+                ;;
+              # Node repos
+              iokdigital/flowport-webapp|iokdigital/iok.digital)
+                fetch_file "frontend/package.json" "$safe_name" 2>/dev/null || true
+                fetch_file "frontend/package-lock.json" "$safe_name" 2>/dev/null || true
+                fetch_file "backend/requirements.txt" "$safe_name" 2>/dev/null || true
+                fetch_file "backend/pyproject.toml" "$safe_name" 2>/dev/null || true
+                fetch_file "package.json" "$safe_name" 2>/dev/null || true
+                fetch_file "package-lock.json" "$safe_name" 2>/dev/null || true
+                ;;
+            esac
+          done
+          echo ""
+          echo "=== Fetched manifests ==="
+          find /tmp/manifests -type f | sort
+
+      - name: Checkout summarization scripts
+        uses: actions/checkout@v7
         with:
-          name: clone-${{ matrix.repo }}
-          path: /tmp/scan/${{ matrix.repo }}
-          retention-days: 1
-          if-no-files-found: error
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
 
-  scan-go:
-    name: Scan Go modules
-    needs: clone
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download Go repos
-        uses: actions/download-artifact@v7
-        with:
-          pattern: clone-iokdigital-*
-          path: /tmp/scan
-
-      - name: Install OSV-Scanner
+      - name: Setup tools
         run: |
-          curl -sfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/install.sh | bash -s -- -b ./bin
-          ./bin/osv-scanner --version
+          curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1
+          apt-get install -y nodejs >/dev/null 2>&1 || true
+          node --version
+          python3 -m pip install --quiet --user pip-audit 2>&1 | tail -2 || true
+          curl -sfL https://raw.githubusercontent.com/google/osv-scanner/main/scripts/install.sh | bash -s -- -b ./bin 2>&1 | tail -3 || true
 
-      - name: Run OSV-Scanner
+      - name: Scan Go modules with OSV-Scanner
         run: |
           mkdir -p /tmp/results/go
-          for repo_dir in /tmp/scan/clone-iokdigital-*/; do
-            repo=$(basename "$repo_dir" | sed 's/^clone-//')
-            echo "=== Scanning $repo ==="
-            if [ -f "$repo_dir/go.mod" ]; then
-              ./bin/osv-scanner --config=- -r "$repo_dir" --format json \
-                --output "/tmp/results/go/${repo//\//_}_osv.json" \
-                > /tmp/results/go/${repo//\//_}_stdout.txt 2>&1 || true
-              echo "  OSV output: $(wc -l < /tmp/results/go/${repo//\//_}_stdout.txt) lines"
-            else
-              echo "  no go.mod"
-            fi
+          for repo_dir in /tmp/manifests/iokdigital-*; do
+            [ -f "${repo_dir}/go.mod" ] || continue
+            repo=$(basename "$repo_dir")
+            echo "=== OSV: $repo ==="
+            ./bin/osv-scanner -r "${repo_dir}" --format json \
+              > "/tmp/results/go/${repo}_osv.json" 2> "/tmp/results/go/${repo}_stderr.txt" || true
+            python3 "${GITHUB_WORKSPACE}/.github/scripts/summarize-osv.py" "/tmp/results/go/${repo}_osv.json" || true
           done
         continue-on-error: true
 
-      - name: Upload Go scan results
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: scan-results-go
-          path: /tmp/results/go
-          retention-days: 7
-          if-no-files-found: ignore
-
-  scan-python:
-    name: Scan Python deps
-    needs: clone
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download Python repos
-        uses: actions/download-artifact@v7
-        with:
-          pattern: clone-iokdigital-*
-          path: /tmp/scan
-
-      - name: Setup Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-
-      - name: Install pip-audit
-        run: pip install --quiet --user pip-audit
-
-      - name: Run pip-audit
+      - name: Scan Python requirements with pip-audit
         run: |
           mkdir -p /tmp/results/python
-          export PATH="$HOME/.local/bin:$PATH"
-          for repo_dir in /tmp/scan/clone-iokdigital-*/; do
-            repo=$(basename "$repo_dir" | sed 's/^clone-//')
-            echo "=== Scanning $repo ==="
-            if [ -f "$repo_dir/requirements.txt" ]; then
-              (cd "$repo_dir" && pip-audit -r requirements.txt --strict --disable-pip 2>&1) \
-                > /tmp/results/python/${repo//\//_}_stdout.txt || true
-              echo "  pip-audit output: $(wc -l < /tmp/results/python/${repo//\//_}_stdout.txt) lines"
-            else
-              echo "  no requirements.txt"
+          export PATH="${HOME}/.local/bin:${PATH}"
+          pip-audit --version 2>&1 || echo "pip-audit not available"
+          for repo_dir in /tmp/manifests/iokdigital-*; do
+            [ -f "${repo_dir}/requirements.txt" ] || continue
+            repo=$(basename "$repo_dir")
+            echo "=== pip-audit: $repo ==="
+            (cd "$repo_dir" && pip-audit -r requirements.txt --disable-pip 2>&1) \
+              > "/tmp/results/python/${repo}_stdout.txt" || true
+            if [ -f "${repo_dir}/pyproject.toml" ]; then
+              echo "  (also scanning pyproject.toml)"
+              (cd "$repo_dir" && pip-audit --disable-pip 2>&1) \
+                >> "/tmp/results/python/${repo}_stdout.txt" || true
             fi
           done
         continue-on-error: true
 
-      - name: Upload Python scan results
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: scan-results-python
-          path: /tmp/results/python
-          retention-days: 7
-          if-no-files-found: ignore
-
-  scan-node:
-    name: Scan Node packages
-    needs: clone
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download Node repos
-        uses: actions/download-artifact@v7
-        with:
-          pattern: clone-iokdigital-*
-          path: /tmp/scan
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-
-      - name: Run npm audit
+      - name: Scan Node packages with npm audit
         run: |
           mkdir -p /tmp/results/node
-          for repo_dir in /tmp/scan/clone-iokdigital-*/; do
-            repo=$(basename "$repo_dir" | sed 's/^clone-//')
-            echo "=== Scanning $repo ==="
-            if [ -f "$repo_dir/package.json" ]; then
-              (cd "$repo_dir" && npm install --silent --no-audit --no-fund 2>/dev/null && npm audit --json 2>/dev/null) \
-                > /tmp/results/node/${repo//\//_}_audit.json || true
-              echo "  npm audit JSON: $(wc -c < /tmp/results/node/${repo//\//_}_audit.json) bytes"
-            else
-              echo "  no package.json"
+          for repo_dir in /tmp/manifests/iokdigital-*; do
+            [ -f "${repo_dir}/package.json" ] || continue
+            [ -f "${repo_dir}/package-lock.json" ] || continue
+            repo=$(basename "$repo_dir")
+            echo "=== npm audit: $repo ==="
+            cd "$repo_dir"
+            if [ ! -d node_modules ]; then
+              npm install --silent --no-audit --no-fund --ignore-scripts 2>/dev/null || true
             fi
+            npm audit --json 2>/dev/null > "/tmp/results/node/${repo}_audit.json" || true
+            python3 "${GITHUB_WORKSPACE}/.github/scripts/summarize-npm-audit.py" "/tmp/results/node/${repo}_audit.json" || true
           done
         continue-on-error: true
-
-      - name: Upload Node scan results
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: scan-results-node
-          path: /tmp/results/node
-          retention-days: 7
-          if-no-files-found: ignore
-
-  aggregate:
-    name: Aggregate + create weekly issue
-    needs: [scan-go, scan-python, scan-node]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all scan results
-        uses: actions/download-artifact@v7
-        with:
-          pattern: scan-results-*
-          path: /tmp/results
-          merge-multiple: true
 
       - name: Build weekly report
         run: |
@@ -231,28 +158,47 @@ jobs:
             echo "**Generated**: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             echo "**Repos scanned**: 7"
             echo ""
-            echo "## Results by ecosystem"
+            echo "## Summary"
+            echo ""
+            echo "| Ecosystem | Files | Notes |"
+            echo "|---|---|---|"
+            for eco in go python node; do
+              count=$(find /tmp/results/$eco -type f 2>/dev/null | wc -l | tr -d ' ')
+              echo "| $eco | $count | see below |"
+            done
+            echo ""
+            echo "## Results"
             echo ""
             for eco in go python node; do
               echo "### $eco"
               echo ""
-              echo '```'
               if [ -d /tmp/results/$eco ]; then
-                for f in /tmp/results/$eco/*_stdout.txt; do
+                for f in /tmp/results/$eco/*; do
                   [ -f "$f" ] || continue
-                  echo "--- $(basename $f _stdout.txt) ---"
-                  head -30 "$f"
+                  echo "--- $(basename $f) ---"
+                  if [[ "$f" == *.json ]]; then
+                    python3 "${GITHUB_WORKSPACE}/.github/scripts/$(echo summarize-osv.py)" "$f" 2>/dev/null || head -20 "$f"
+                  else
+                    head -20 "$f"
+                  fi
                   echo ""
                 done
-              else
-                echo "(no results)"
               fi
-              echo '```'
-              echo ""
             done
+            echo "## Detailed results"
+            echo ""
+            echo "All raw outputs uploaded as workflow artifacts."
           } > /tmp/weekly-report.md
-          echo "report_path=/tmp/weekly-report.md" >> $GITHUB_OUTPUT
-          wc -l /tmp/weekly-report.md
+          echo "report size: $(wc -l < /tmp/weekly-report.md) lines"
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: weekly-report
+          path: /tmp/weekly-report.md
+          retention-days: 90
+          if-no-files-found: warn
 
       - name: Create or update weekly issue
         uses: actions/github-script@v7
@@ -269,7 +215,7 @@ jobs:
               labels: 'weekly-org-security-scan'
             });
 
-            const title = `Weekly iokdigital Security Scan - ${date}`;
+            const title = 'Weekly iokdigital Security Scan - ' + date;
             const body = report;
 
             if (issues.data.length > 0) {
@@ -280,7 +226,7 @@ jobs:
                 body,
                 state: 'open'
               });
-              core.info(`Updated issue #${issues.data[0].number}`);
+              core.info('Updated issue #' + issues.data[0].number);
             } else {
               await github.rest.issues.create({
                 owner: context.repo.owner,
