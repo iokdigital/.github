@@ -37,81 +37,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
           mkdir -p /tmp/manifests
-          cd /tmp/manifests
-
-          REPOS=(
-            "iokdigital/alteryx2airflow:main"
-            "iokdigital/alteryx2talend:develop"
-            "iokdigital/flowport-webapp:develop"
-            "iokdigital/flowport2jira:develop"
-            "iokdigital/go-mermaid:main"
-            "iokdigital/iok.digital:main"
-            "iokdigital/talend2airflow:main"
-          )
-
-          fetch_file() {
-            local path="$1" dest_dir="$2"
-            mkdir -p "$dest_dir"
-            local http_code
-            http_code=$(curl -sfL -o "${dest_dir}/${path##*/}" -w "%{http_code}" \
-              -H "Authorization: token ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github.raw" \
-              "https://api.github.com/repos/${repo}/contents/${path}?ref=${branch}" 2>/dev/null) || http_code="404"
-            if [ "$http_code" = "200" ]; then
-              echo "  OK: $path"
-            else
-              echo "  MISSING ($http_code): $path"
-              rm -f "${dest_dir}/${path##*/}"
-            fi
-          }
-
-          for entry in "${REPOS[@]}"; do
-            IFS=':' read -r repo branch <<< "$entry"
-            safe_name=$(echo "$repo" | tr '/' '-')
-            echo ""
-            echo "=== Fetching manifests from $repo @ $branch ==="
-            case "$repo" in
-              # Go repos - always have go.mod; some have nested
-              iokdigital/alteryx2airflow|iokdigital/alteryx2talend|iokdigital/go-mermaid)
-                fetch_file "go.mod" "$safe_name"
-                fetch_file "go.sum" "$safe_name"
-                fetch_file "worker/go.mod" "$safe_name"
-                fetch_file "worker/requirements.txt" "$safe_name"
-                fetch_file "worker/go.sum" "$safe_name"
-                ;;
-              iokdigital/talend2airflow)
-                fetch_file "go.mod" "$safe_name"
-                fetch_file "go.sum" "$safe_name"
-                fetch_file "worker/go.mod" "$safe_name"
-                fetch_file "worker/go.sum" "$safe_name"
-                fetch_file "worker/requirements.txt" "$safe_name"
-                ;;
-              # Python-only repo
-              iokdigital/flowport2jira)
-                fetch_file "requirements.txt" "$safe_name"
-                fetch_file "requirements-lock.txt" "$safe_name"
-                fetch_file "requirements-dev.txt" "$safe_name"
-                ;;
-              # Node repos
-              iokdigital/flowport-webapp)
-                fetch_file "frontend/package.json" "$safe_name"
-                fetch_file "frontend/package-lock.json" "$safe_name"
-                fetch_file "backend/pyproject.toml" "$safe_name"
-                fetch_file "backend/requirements.txt" "$safe_name"
-                fetch_file "backend/requirements-lock.txt" "$safe_name"
-                ;;
-              iokdigital/iok.digital)
-                fetch_file "package.json" "$safe_name"
-                fetch_file "package-lock.json" "$safe_name"
-                fetch_file "lambda/package.json" "$safe_name"
-                fetch_file "lambda/package-lock.json" "$safe_name"
-                ;;
-            esac
-          done
-          echo ""
-          echo "=== Total files fetched: $(find /tmp/manifests -type f | wc -l) ==="
+          python3 "$GITHUB_WORKSPACE/.github/scripts/fetch-manifests.py"
+          echo ''
+          echo '=== Total files fetched ==='
+          find /tmp/manifests -type f | wc -l
 
       - name: Checkout summarization scripts
         uses: actions/checkout@v7
