@@ -1,0 +1,38 @@
+name: cleanup-ghcr
+
+# Keep ghcr.io storage minimal: retain last 5 versioned images + latest, delete untagged.
+# Uses GITHUB_TOKEN (packages: write) — no extra PAT needed for org packages.
+# Runs nightly; safe to run manually via workflow_dispatch.
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # 02:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [flowport-webapp, alteryx2talend, flowport2jira]
+        # flowport-common is a pip package (git+https), not a container — no ghcr image
+    steps:
+      - name: Delete old ghcr.io images (keep 5)
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ matrix.package }}
+          package-type: container
+          min-versions-to-keep: 5
+          delete-only-untagged-versions: false
+          # Keep latest even if untagged is false — latest is tagged, so it stays
+      - name: Delete untagged images
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ matrix.package }}
+          package-type: container
+          min-versions-to-keep: 0
+          delete-only-untagged-versions: true
