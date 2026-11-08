@@ -23,10 +23,6 @@ on:
       INFISICAL_PROJECT_ID:
         required: true
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
