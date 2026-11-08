@@ -1,7 +1,7 @@
 name: Publish BDD to Confluence
 
 # Centralized reusable workflow. Consumer repos call this with:
-#   uses: iokdigital/.github/.github/workflows/publish-bdd.yml@main
+#   uses: iokdigital/.github/.github/workflows/publish-bdd.yml@c25cfa12f2e84bcf0804e3174ab031c97887a3f4  # main
 #   with:
 #     component: <repo-name>
 #   secrets: inherit
