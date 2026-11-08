@@ -147,6 +147,13 @@ jobs:
           {
             echo "# Weekly iokdigital Security Scan"
             echo ""
+            echo "> **Source:** org-security-scan.yml (weekly org scan, iokdigital/.github)"
+            echo "> **Repository:** ${GITHUB_REPOSITORY}"
+            echo "> **Run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "> **Created**: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "> **Severity:** info (escalate to high if critical CVEs listed below)"
+            echo "> **Dedup key:** weekly-org-security-scan (open issue updated in place)"
+            echo ""
             echo "**Generated**: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             echo "**Repos scanned**: 7"
             echo ""
@@ -183,6 +190,9 @@ jobs:
             echo "## Artifacts"
             echo ""
             echo "Raw scanner outputs uploaded as workflow artifacts (retention 90 days)."
+            echo ""
+            echo "---"
+            echo "🤖 Auto-filed by CI. Label \`ci-filed\` marks it for Jira auto-sync."
           } > /tmp/weekly-report.md
           echo "report size: $(wc -l < /tmp/weekly-report.md) lines"
 
@@ -210,7 +220,7 @@ jobs:
               labels: 'weekly-org-security-scan'
             });
 
-            const title = 'Weekly iokdigital Security Scan - ' + date;
+            const title = '[security-scan] Weekly iokdigital Security Scan - ' + date;
             const body = report;
 
             if (issues.data.length > 0) {
@@ -228,6 +238,6 @@ jobs:
                 repo: context.repo.repo,
                 title,
                 body,
-                labels: ['weekly-org-security-scan', 'security']
+                labels: ['weekly-org-security-scan', 'security', 'ci-filed']
               });
             }
