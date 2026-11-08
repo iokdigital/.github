@@ -1,0 +1,60 @@
+name: "Fetch Infisical Secrets"
+description: "Fetch secrets from Infisical and set as environment variables"
+inputs:
+  client-id:
+    description: "Infisical Universal Auth client ID"
+    required: true
+  client-secret:
+    description: "Infisical Universal Auth client secret"
+    required: true
+  project-id:
+    description: "Infisical project ID"
+    required: true
+  secret-keys:
+    description: "Comma-separated list of secret keys to fetch"
+    required: true
+  environment:
+    description: "Infisical environment (dev, staging, prod)"
+    default: "dev"
+    required: false
+runs:
+  using: "composite"
+  steps:
+    - name: Get Access Token
+      id: auth
+      shell: bash
+      run: |
+        TOKEN_RESPONSE=$(curl -s -X POST "https://us.infisical.com/api/v1/auth/universal-auth/login" \
+          -H "Content-Type: application/json" \
+          -d "{\"clientId\": \"${{ inputs.client-id }}\", \"clientSecret\": \"${{ inputs.client-secret }}\"}")
+
+        ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.accessToken')
+        if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+          echo "Error: Failed to authenticate with Infisical"
+          exit 1
+        fi
+        echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+
+    - name: Fetch Secrets
+      shell: bash
+      env:
+        ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        SECRET_KEYS: ${{ inputs.secret-keys }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        PROJECT_ID: ${{ inputs.project-id }}
+      run: |
+        IFS=',' read -ra KEYS <<< "$SECRET_KEYS"
+        for key in "${KEYS[@]}"; do
+          key=$(echo "$key" | tr -d ' ')
+          echo "Fetching: $key"
+          VALUE=$(curl -s "https://us.infisical.com/api/v4/secrets?projectId=$PROJECT_ID&environment=$ENVIRONMENT&secretKeys=$key" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.secrets[0].secretValue')
+
+          if [ -z "$VALUE" ] || [ "$VALUE" = "null" ]; then
+            echo "Warning: Secret $key not found"
+            continue
+          fi
+
+          echo "$key=$VALUE" >> $GITHUB_ENV
+          echo "Retrieved: $key"
+        done
