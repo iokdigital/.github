@@ -1,0 +1,67 @@
+name: Publish BDD to Confluence
+
+# Centralized reusable workflow. Consumer repos call this with:
+#   uses: iokdigital/.github/.github/workflows/publish-bdd.yml@main
+#   with:
+#     component: <repo-name>
+#   secrets: inherit
+# Consumers keep their own trigger (push to develop on docs/BDD/*.feature)
+# and workflow_dispatch.
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: 'Component name (repo name) published to Confluence'
+        required: true
+        type: string
+    secrets:
+      INFISICAL_CLIENT_ID:
+        required: true
+      INFISICAL_CLIENT_SECRET:
+        required: true
+      INFISICAL_PROJECT_ID:
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish-bdd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - name: Checkout caller code
+      uses: actions/checkout@v7.0.1
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.ref }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v7.0.0
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: pip install requests
+
+    - name: Fetch Confluence Secrets from Infisical
+      uses: ./.github/actions/infisical-secrets
+      with:
+        client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+        client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        project-id: ${{ secrets.INFISICAL_PROJECT_ID }}
+        secret-keys: "ATLASSIAN_CONFLUENCE_TOKEN,ATLASSIAN_CONFLUENCE_EMAIL"
+
+    - name: Publish BDD to Confluence
+      env:
+        CONFLUENCE_BASE_URL: https://iokdigital.atlassian.net/wiki
+        SPACE_KEY: PORT
+        COMPONENT: ${{ inputs.component }}
+      run: python scripts/publish_bdd.py

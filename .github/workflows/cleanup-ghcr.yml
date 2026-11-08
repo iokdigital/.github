@@ -1,0 +1,124 @@
+name: cleanup-ghcr
+
+# Centralized ghcr.io retention workflow.
+# Reusable: called by consumer repos via workflow_call.
+# Policy (mirrors the DOCR cleanup-docr.yml policy):
+#   keep: latest, all release tags (v* and numeric versions)
+#   keep: newest 5 transient tags
+#   delete: everything else, including untagged manifests (where the
+#   orphaned blobs hide)
+# Safe to run manually via workflow_dispatch in the consumer (dry-run by
+# default - uncheck to actually delete). Uses GITHUB_TOKEN
+# (packages: read+write). Package names are passed via the `packages` input
+# because the Packages API has no repo-level list endpoint.
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: 'Space-separated ghcr.io package names owned by this repo'
+        required: true
+        type: string
+      keep:
+        description: 'Number of newest transient tags to keep'
+        required: false
+        type: string
+        default: '5'
+      dry_run:
+        description: 'Dry run (list only, delete nothing)'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      GH_TOKEN:
+        description: 'GitHub token with packages:write (defaults to GITHUB_TOKEN)'
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune old container versions
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          ORG: iokdigital
+          PACKAGES: ${{ inputs.packages }}
+          KEEP: ${{ inputs.keep }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, subprocess
+
+          ORG = os.environ.get("ORG", "")
+          PACKAGES = os.environ.get("PACKAGES", "").split()
+          KEEP = int(os.environ.get("KEEP", "5"))
+          DRY_RUN = str(os.environ.get("DRY_RUN", "true")).lower() == "true"
+          PROTECTED = re.compile(r"^(latest|v.+|[0-9]+\..*)$")
+
+
+          def gh_api(*args):
+              try:
+                  out = subprocess.run(["gh", "api", *args], check=True,
+                                       capture_output=True, text=True).stdout
+              except subprocess.CalledProcessError as e:
+                  print(f"gh api failed: {' '.join(args)}")
+                  print(f"stderr: {(e.stderr or '')[:500]}")
+                  raise
+              data = json.loads(out or "[]")
+              return data if isinstance(data, list) else [data]
+
+
+          def list_versions(package):
+              items, page = [], 1
+              while True:
+                  batch = gh_api(
+                      f"/orgs/{ORG}/packages/container/{package}/versions"
+                      f"?per_page=100&page={page}")
+                  if not batch:
+                      break
+                  items.extend(batch)
+                  if len(batch) < 100:
+                      break
+                  page += 1
+              return items
+
+
+          def version_tags(v):
+              meta = v.get("metadata") or {}
+              return (meta.get("container") or {}).get("tags", []) or []
+
+
+          def select_for_deletion(versions, keep=KEEP):
+              transient = [v for v in versions
+                           if not any(PROTECTED.match(t or "") for t in version_tags(v))]
+              transient.sort(key=lambda v: v.get("updated_at", ""), reverse=True)
+              return transient[keep:]
+
+
+          def main():
+              assert ORG and PACKAGES, "ORG and PACKAGES env required"
+              deleted = 0
+              for name in PACKAGES:
+                  versions = list_versions(name)
+                  doomed = select_for_deletion(versions)
+                  print(f"== {name}: {len(versions)} versions, deleting {len(doomed)}")
+                  for v in doomed:
+                      vid, tags = v["id"], version_tags(v)
+                      if DRY_RUN:
+                          print(f"  DRY-RUN delete version {vid} tags={tags}")
+                          continue
+                      subprocess.run(
+                          ["gh", "api", "--method", "DELETE",
+                           f"/orgs/{ORG}/packages/container/{name}/versions/{vid}"],
+                          check=True, capture_output=True, text=True)
+                      print(f"  deleted version {vid} tags={tags}")
+                      deleted += 1
+              print(f"Versions deleted: {deleted} (dry_run={DRY_RUN})")
+
+
+          main()
+          PYEOF
