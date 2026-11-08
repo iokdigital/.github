@@ -52,7 +52,7 @@ jobs:
       run: pip install requests
 
     - name: Fetch Confluence Secrets from Infisical
-      uses: ./.github/actions/infisical-secrets
+      uses: iokdigital/.github/.github/actions/infisical-secrets@7cac2dcc212c6ddace3eef23f0eca8707eed1c1a
       with:
         client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
         client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
