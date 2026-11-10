@@ -15,9 +15,9 @@ on:
   workflow_call:
     inputs:
       issue_number:
-        description: 'GitHub issue number to sync to Jira'
+        description: 'GitHub issue number to sync to Jira (string: dispatch inputs arrive as strings and cross the reusable boundary uncoerced)'
         required: true
-        type: number
+        type: string
       jira_project:
         description: 'Jira project key for created work items'
         default: 'PORT'
