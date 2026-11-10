@@ -1,0 +1,75 @@
+name: GitHub to Jira sync (reusable)
+
+# Centralized reusable workflow. Consumer repos call this with:
+#   uses: iokdigital/.github/.github/workflows/github-jira-sync.yml@main
+#   with:
+#     issue_number: ${{ github.event.issue.number || inputs.issue_number }}
+#     jira_project: PORT
+#   secrets: inherit
+# Consumers keep their own trigger (issues opened/labeled + workflow_dispatch)
+# and top-level permissions (contents: read, issues: write).
+# Single source of truth for the sync script lives next to this file:
+# .github/scripts/github_jira_sync.py (checked out sparsely at runtime).
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: 'GitHub issue number to sync to Jira'
+        required: true
+        type: number
+      jira_project:
+        description: 'Jira project key for created work items'
+        default: 'PORT'
+        required: false
+        type: string
+    secrets:
+      INFISICAL_CLIENT_ID:
+        required: true
+      INFISICAL_CLIENT_SECRET:
+        required: true
+      INFISICAL_PROJECT_ID:
+        required: true
+      CROSS_REPO_READ_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  create-jira:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: Checkout central sync script
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: iokdigital/.github
+        ref: main
+        token: ${{ secrets.CROSS_REPO_READ_TOKEN }}
+        path: .central
+        sparse-checkout: |
+          .github/scripts/github_jira_sync.py
+        sparse-checkout-cone-mode: false
+
+    - name: Fetch Jira credentials from Infisical
+      uses: iokdigital/.github/.github/actions/infisical-secrets@7cac2dcc212c6ddace3eef23f0eca8707eed1c1a
+      with:
+        client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+        client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        project-id: ${{ secrets.INFISICAL_PROJECT_ID }}
+        environment: dev
+        secret-keys: "ATLASSIAN_USER,ATLASSIAN_JIRA_TOKEN"
+
+    - name: Create Jira issue + link back
+      env:
+        JIRA_BASE_URL: https://iokdigital.atlassian.net
+        JIRA_PROJECT_KEY: ${{ inputs.jira_project }}
+        JIRA_USER: ${{ env.ATLASSIAN_USER }}
+        JIRA_TOKEN: ${{ env.ATLASSIAN_JIRA_TOKEN }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        REPO_FULL: ${{ github.repository }}
+        ISSUE_NUMBER: ${{ inputs.issue_number }}
+      run: python3 .central/.github/scripts/github_jira_sync.py
