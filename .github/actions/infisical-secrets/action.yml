@@ -47,8 +47,13 @@ runs:
         for key in "${KEYS[@]}"; do
           key=$(echo "$key" | tr -d ' ')
           echo "Fetching: $key"
-          VALUE=$(curl -s "https://us.infisical.com/api/v4/secrets?projectId=$PROJECT_ID&environment=$ENVIRONMENT&secretKeys=$key" \
-            -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.secrets[0].secretValue')
+          # Path-style single-secret fetch: the list endpoint ignores the
+          # ?secretKeys= query param (returns the full list, so .secrets[0]
+          # is always the alphabetically-first secret — that bug shipped
+          # Confluence-token values into S3_* and failed the Jira sync with
+          # Jira 400). Path fetch returns the exact secret.
+          VALUE=$(curl -s "https://us.infisical.com/api/v4/secrets/$key?projectId=$PROJECT_ID&environment=$ENVIRONMENT&secretPath=/" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.secret.secretValue')
 
           if [ -z "$VALUE" ] || [ "$VALUE" = "null" ]; then
             echo "Warning: Secret $key not found"
