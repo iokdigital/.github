@@ -1,0 +1,45 @@
+name: Semgrep SAST
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+
+jobs:
+  semgrep:
+    name: Semgrep Scan
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - name: Checkout caller code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+
+      - name: Run Semgrep
+        run: semgrep ci --sarif --output=semgrep-results.sarif || true
+        env:
+          SEMGREP_RULES: p/default p/golang p/docker p/owasp-top-ten
+        continue-on-error: true
+
+      - name: Upload Semgrep results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: semgrep-results.sarif
+          category: 'semgrep-sast'
+
+      - name: Upload Semgrep artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        continue-on-error: true
+        with:
+          name: semgrep-report
+          path: semgrep-results.sarif
+          retention-days: 30
