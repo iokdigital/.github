@@ -10,6 +10,7 @@ name: Reusable Security Scan
 
 on:
   workflow_call:
+  workflow_dispatch:
     inputs:
       image-names:
         description: "Comma-separated Docker image names to build and scan"
