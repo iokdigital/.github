@@ -112,10 +112,6 @@ jobs:
     name: Grype Scan
     runs-on: ubuntu-latest
     if: inputs.image-names != ''
-    strategy:
-      matrix:
-        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-    needs: prepare
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -124,7 +120,7 @@ jobs:
           ref: ${{ github.ref }}
 
       - name: Build Docker image
-        run: docker build -f ${{ matrix.dockerfile }} -t ${{ matrix.image }}:test .
+        run: docker build -f ${{ inputs.dockerfiles }} -t ${{ inputs.image-names }}:test .
         continue-on-error: true
 
       - name: Grype filesystem scan
@@ -140,7 +136,7 @@ jobs:
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
         continue-on-error: true
         with:
-          image: "${{ matrix.image }}:test"
+          image: "${{ inputs.image-names }}:test"
           fail-build: false
           output-format: sarif
           output-file: grype-image-results.sarif
@@ -150,39 +146,14 @@ jobs:
         if: always()
         with:
           sarif_file: grype-fs-results.sarif
-          category: 'grype-filesystem-${{ matrix.image }}'
+          category: 'grype-filesystem'
 
       - name: Upload Grype image results
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4
         if: always()
         with:
           sarif_file: grype-image-results.sarif
-          category: 'grype-image-${{ matrix.image }}'
-
-  prepare:
-    name: Prepare Grype matrix
-    runs-on: ubuntu-latest
-    if: inputs.image-names != ''
-    outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
-    steps:
-      - name: Build matrix JSON
-        id: set
-        run: |
-          images="${{ inputs.image-names }}"
-          dockers="${{ inputs.dockerfiles }}"
-          IFS=',' read -ra IMG <<< "$images"
-          IFS=',' read -ra DOCKER <<< "$dockers"
-          # Build include array
-          items=""
-          for i in "${!IMG[@]}"; do
-            img=$(echo "${IMG[$i]}" | xargs)
-            docker=$(echo "${DOCKER[$i]}" | xargs)
-            [ -z "$docker" ] && docker="Dockerfile"
-            if [ -n "$items" ]; then items="$items,"; fi
-            items="$items{\"image\":\"$img\",\"dockerfile\":\"$docker\"}"
-          done
-          echo "matrix={\"include\":[$items]}" >> $GITHUB_OUTPUT
+          category: 'grype-image'
 
   gosec:
     name: Go Security Checker
