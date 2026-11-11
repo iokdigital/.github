@@ -1,0 +1,253 @@
+name: Reusable Security Scan
+
+# Centralized reusable workflow. Consumer repos call this with:
+#   uses: iokdigital/.github/.github/workflows/security-reusable.yml@<sha>
+#   with:
+#     image-names: "alteryx2fabric-worker"   # comma-separated
+#     dockerfiles: "Dockerfile.worker"         # comma-separated, aligned
+#   secrets: inherit
+# For Go repos: image-names="<repo>-worker", dockerfiles="Dockerfile.worker"
+
+on:
+  workflow_call:
+    inputs:
+      image-names:
+        description: "Comma-separated Docker image names to build and scan"
+        required: false
+        type: string
+        default: ""
+      dockerfiles:
+        description: "Comma-separated Dockerfile paths (empty for default Dockerfile)"
+        required: false
+        type: string
+        default: "Dockerfile"
+    secrets:
+      GITLEAKS_LICENSE:
+        description: "Gitleaks license key for secret scanning"
+        required: false
+      CROSS_REPO_READ_TOKEN:
+        description: "PAT for private Go module fetches during docker build"
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  osv-dependencies:
+    name: OSV-Scanner Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run OSV-Scanner
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36  # v2.7.0
+        continue-on-error: true
+        with:
+          scan-args: |-
+            -r
+            --sbom-sources=gosum
+            --format=sarif
+            --output=osv-results.sarif
+            ./
+
+      - name: Upload OSV-Scanner results
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4
+        if: always()
+        with:
+          sarif_file: osv-results.sarif
+          category: 'osv-dependency-scan'
+
+  govulncheck:
+    name: Go Vulnerability Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: |
+          echo "Running govulncheck on pure Go packages..."
+          CGO_ENABLED=0 govulncheck -json ./cmd/... ./pkg/... 2>&1 | tee govulncheck-results.json || {
+            echo "Falling back to cmd packages only..."
+            CGO_ENABLED=0 govulncheck -json ./cmd/... > govulncheck-results.json 2>&1 || true
+          }
+          if [ ! -s govulncheck-results.json ]; then
+            echo '{"type":"govulncheck","skipped":"CGO packages require system libraries"}' > govulncheck-results.json
+          fi
+
+      - name: Upload govulncheck results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: govulncheck-report
+          path: govulncheck-results.json
+          retention-days: 30
+
+  grype-scan:
+    name: Grype Scan
+    runs-on: ubuntu-latest
+    if: inputs.image-names != ''
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    needs: prepare
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+
+      - name: Build Docker image
+        run: docker build -f ${{ matrix.dockerfile }} -t ${{ matrix.image }}:test .
+        continue-on-error: true
+
+      - name: Grype filesystem scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
+        continue-on-error: true
+        with:
+          path: ./
+          fail-build: false
+          output-format: sarif
+          output-file: grype-fs-results.sarif
+
+      - name: Grype image scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
+        continue-on-error: true
+        with:
+          image: "${{ matrix.image }}:test"
+          fail-build: false
+          output-format: sarif
+          output-file: grype-image-results.sarif
+
+      - name: Upload Grype filesystem results
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4
+        if: always()
+        with:
+          sarif_file: grype-fs-results.sarif
+          category: 'grype-filesystem-${{ matrix.image }}'
+
+      - name: Upload Grype image results
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4
+        if: always()
+        with:
+          sarif_file: grype-image-results.sarif
+          category: 'grype-image-${{ matrix.image }}'
+
+  prepare:
+    name: Prepare Grype matrix
+    runs-on: ubuntu-latest
+    if: inputs.image-names != ''
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: Build matrix JSON
+        id: set
+        run: |
+          images="${{ inputs.image-names }}"
+          dockers="${{ inputs.dockerfiles }}"
+          IFS=',' read -ra IMG <<< "$images"
+          IFS=',' read -ra DOCKER <<< "$dockers"
+          # Build include array
+          items=""
+          for i in "${!IMG[@]}"; do
+            img=$(echo "${IMG[$i]}" | xargs)
+            docker=$(echo "${DOCKER[$i]}" | xargs)
+            [ -z "$docker" ] && docker="Dockerfile"
+            if [ -n "$items" ]; then items="$items,"; fi
+            items="$items{\"image\":\"$img\",\"dockerfile\":\"$docker\"}"
+          done
+          echo "matrix={\"include\":[$items]}" >> $GITHUB_OUTPUT
+
+  gosec:
+    name: Go Security Checker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run Gosec
+        uses: securego/gosec@deb54465fea23d19a77f037e11e6589021f8501d  # v2.29.0
+        with:
+          args: '-no-fail -fmt sarif -out gosec-results.sarif ./...'
+
+      - name: Upload Gosec results
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4
+        if: always()
+        with:
+          sarif_file: gosec-results.sarif
+          category: 'gosec'
+
+  gitleaks:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        continue-on-error: true
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48  # v4
+        with:
+          fail-on-severity: high
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Unlicense
