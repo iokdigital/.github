@@ -66,8 +66,10 @@ jobs:
           tags: |
             registry.digitalocean.com/flowport-registry/${{ inputs.image_name }}:develop-latest
             registry.digitalocean.com/flowport-registry/${{ inputs.image_name }}:develop-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache: the `type=gha` cache served stale pip layers (celery
+          # 5.6.3 while requirements.txt pinned 5.7.0), deploying wrong images.
+          # Deterministic no-cache builds are preferred for correctness.
+          # (Re-applied: an env-block rework reintroduced the cache lines.)
           build-args: |
             CROSS_REPO_READ_TOKEN=${{ secrets.CROSS_REPO_READ_TOKEN }}
             VERSION=${{ steps.version.outputs.version }}
