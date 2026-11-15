@@ -1,0 +1,164 @@
+name: CD - DigitalOcean
+
+# Centralized reusable workflow. Consumer repos call this with:
+#   uses: iokdigital/.github/.github/workflows/cd-digitalocean.yml@<sha>
+#   with:
+#     image_name: alteryx2fabric-worker
+#     dockerfile: Dockerfile.worker
+#     title: "Alteryx to Fabric Worker with Celery"
+#   secrets: inherit
+# Builds and pushes to DOCR on tag push (v*), generates release notes + SBOM.
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: "Docker image name (e.g., alteryx2fabric-worker)"
+        required: true
+        type: string
+      dockerfile:
+        description: "Dockerfile path"
+        required: false
+        type: string
+        default: "Dockerfile.worker"
+      title:
+        description: "Image title (org.opencontainers.image.title)"
+        required: false
+        type: string
+        default: "Worker"
+    secrets:
+      DIGITALOCEAN_ACCESS_TOKEN:
+        required: true
+      CROSS_REPO_READ_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+env:
+  REGISTRY: registry.digitalocean.com/flowport-registry
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout caller code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+
+      - name: Get version and metadata
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+
+          TAGS="${{ env.REGISTRY }}/${{ inputs.image_name }}:$VERSION"
+          TAGS="$TAGS,${{ env.REGISTRY }}/${{ inputs.image_name }}:$SHORT_SHA"
+          TAGS="$TAGS,${{ env.REGISTRY }}/${{ inputs.image_name }}:latest"
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            NOTES="Release $VERSION"
+          else
+            NOTES="# Release $VERSION | $PREV_TAG..HEAD\n"
+            NOTES+="**Release Date**: $(date +%Y-%m-%d)\n\n"
+
+            FEATURES=$(git log $PREV_TAG..HEAD --pretty=format:"%s" --grep="^feat" 2>/dev/null | sed 's/^feat: /- /' || true)
+            if [ -n "$FEATURES" ]; then
+              NOTES+="## Features\n$FEATURES\n\n"
+            fi
+
+            FIXES=$(git log $PREV_TAG..HEAD --pretty=format:"%s" --grep="^fix" 2>/dev/null | sed 's/^fix: /- /' || true)
+            if [ -n "$FIXES" ]; then
+              NOTES+="## Bug Fixes\n$FIXES\n\n"
+            fi
+
+            DEPS=$(git log $PREV_TAG..HEAD --pretty=format:"%s" --grep="^deps" 2>/dev/null | sed 's/^deps: /- /' || true)
+            if [ -n "$DEPS" ]; then
+              NOTES+="## Dependencies\n$DEPS\n\n"
+            fi
+
+            CHORES=$(git log $PREV_TAG..HEAD --pretty=format:"%s" --grep="^chore" 2>/dev/null | sed 's/^chore: /- /' || true)
+            if [ -n "$CHORES" ]; then
+              NOTES+="## Maintenance\n$CHORES\n\n"
+            fi
+          fi
+          NOTES="${NOTES//'%'/'%25'}"
+          NOTES="${NOTES//$'\\n'/'%0A'}"
+          NOTES="${NOTES//$'\\r'/'%0D'}"
+          echo "release_notes=$NOTES" >> $GITHUB_OUTPUT
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f  # v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Login to DigitalOcean Container Registry
+        run: doctl registry login
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            COMMIT_HASH=${{ steps.meta.outputs.short_sha }}
+            CROSS_REPO_READ_TOKEN=${{ secrets.CROSS_REPO_READ_TOKEN }}
+            ENABLE_SCHEMA_INTELLIGENCE=true
+            RELEASE_NOTES=${{ steps.release_notes.outputs.release_notes }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=${{ inputs.title }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.build_time }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.short_sha }}
+            org.opencontainers.image.source=${{ github.repository_url }}
+            org.opencontainers.image.description=${{ steps.release_notes.outputs.release_notes }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate Container SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
+        with:
+          image: ${{ env.REGISTRY }}/${{ inputs.image_name }}:${{ steps.meta.outputs.version }}
+          format: spdx-json
+          output-file: container-sbom-${{ inputs.image_name }}.json
+
+      - name: Upload Container SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: container-sbom-${{ inputs.image_name }}-${{ steps.meta.outputs.version }}
+          path: container-sbom-${{ inputs.image_name }}.json
+          retention-days: 90
+
+      - name: Verify deployment
+        run: |
+          echo "Image: ${{ inputs.image_name }}"
+          echo "Version: ${{ steps.meta.outputs.version }}"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
