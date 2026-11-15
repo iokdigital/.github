@@ -32,11 +32,6 @@ on:
       CROSS_REPO_READ_TOKEN:
         required: false
 
-permissions:
-  contents: read
-  security-events: write
-  actions: read
-
 env:
   REGISTRY: registry.digitalocean.com/flowport-registry
 
