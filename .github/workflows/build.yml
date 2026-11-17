@@ -24,6 +24,17 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      # Restore the pre-centralization "Authenticate git for private deps"
+      # step (lost in the Tier 3c refactor, 57df89c). Without it, private
+      # module fetches rely on the runner's Go module cache: a cold cache
+      # (new go.sum) makes go mod download hit github.com anonymously —
+      # actions/checkout's persisted same-repo credentials then hijack the
+      # request and it fails with "could not read Username". Observed on the
+      # go-mermaid v0.5.0 bump PRs (s2t #162, s2f #71, 2026-11-17).
+      - name: Authenticate git for private deps
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.CROSS_REPO_READ_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - name: Download dependencies
         run: go mod download
 
