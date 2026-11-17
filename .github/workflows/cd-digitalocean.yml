@@ -133,8 +133,9 @@ jobs:
             org.opencontainers.image.revision=${{ steps.meta.outputs.short_sha }}
             org.opencontainers.image.source=${{ github.repository_url }}
             org.opencontainers.image.description=${{ steps.release_notes.outputs.release_notes }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache: the `type=gha` cache served stale layers (celery 5.6.3
+          # while requirements.txt pinned 5.7.0), deploying wrong images.
+          # Deterministic no-cache builds are preferred for prod releases.
 
       - name: Generate Container SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
