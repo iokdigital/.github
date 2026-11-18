@@ -33,7 +33,8 @@ runs:
           echo "Error: Failed to authenticate with Infisical"
           exit 1
         fi
-        echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+        echo "::add-mask::$ACCESS_TOKEN"
+          echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
 
     - name: Fetch Secrets
       shell: bash
@@ -60,6 +61,7 @@ runs:
             continue
           fi
 
+          echo "::add-mask::$VALUE"
           echo "$key=$VALUE" >> $GITHUB_ENV
           echo "Retrieved: $key"
         done
