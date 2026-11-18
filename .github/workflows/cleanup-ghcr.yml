@@ -103,7 +103,18 @@ jobs:
               assert ORG and PACKAGES, "ORG and PACKAGES env required"
               deleted = 0
               for name in PACKAGES:
-                  versions = list_versions(name)
+                  try:
+                      versions = list_versions(name)
+                  except subprocess.CalledProcessError as e:
+                      # Package never published (e.g. talend2airflow failed
+                      # 2026-11-08 with "Package not found"): skip it instead
+                      # of failing the whole run. Match the body, not just
+                      # the status: a bare 404 can also mean a typo'd package
+                      # name or missing read:packages, which must still fail.
+                      if "Package not found" in (e.stderr or ""):
+                          print(f"== {name}: SKIPPED (package not found)")
+                          continue
+                      raise
                   doomed = select_for_deletion(versions)
                   print(f"== {name}: {len(versions)} versions, deleting {len(doomed)}")
                   for v in doomed:
