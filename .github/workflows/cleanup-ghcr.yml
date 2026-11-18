@@ -107,9 +107,11 @@ jobs:
                       versions = list_versions(name)
                   except subprocess.CalledProcessError as e:
                       # Package never published (e.g. talend2airflow failed
-                      # 2026-11-08 with HTTP 404): skip it instead of failing
-                      # the whole run for every consumer repo.
-                      if "HTTP 404" in (e.stderr or ""):
+                      # 2026-11-08 with "Package not found"): skip it instead
+                      # of failing the whole run. Match the body, not just
+                      # the status: a bare 404 can also mean a typo'd package
+                      # name or missing read:packages, which must still fail.
+                      if "Package not found" in (e.stderr or ""):
                           print(f"== {name}: SKIPPED (package not found)")
                           continue
                       raise
