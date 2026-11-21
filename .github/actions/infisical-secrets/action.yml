@@ -34,7 +34,8 @@ runs:
           exit 1
         fi
         echo "::add-mask::$ACCESS_TOKEN"
-          echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+          echo "::add-mask::$ACCESS_TOKEN"
+        echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
 
     - name: Fetch Secrets
       shell: bash
@@ -61,6 +62,10 @@ runs:
             continue
           fi
 
+          echo "::add-mask::$VALUE"
+          # Mask before export: values written to GITHUB_ENV are NOT
+          # auto-masked by the runner, and the next step's `env:` block
+          # is echoed to the log in plaintext.
           echo "::add-mask::$VALUE"
           echo "$key=$VALUE" >> $GITHUB_ENV
           echo "Retrieved: $key"
