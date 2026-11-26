@@ -38,6 +38,7 @@ jobs:
   osv-dependencies:
     name: OSV-Scanner Dependency Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -74,6 +75,7 @@ jobs:
   govulncheck:
     name: Go Vulnerability Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -112,6 +114,7 @@ jobs:
   grype-scan:
     name: Grype Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: inputs.image-names != ''
     steps:
       - name: Checkout code
@@ -161,6 +164,7 @@ jobs:
   gosec:
     name: Go Security Checker
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -190,6 +194,7 @@ jobs:
   gitleaks:
     name: Secret Scanning
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
